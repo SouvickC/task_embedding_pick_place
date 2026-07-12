@@ -223,11 +223,22 @@ runs/
 logs/
 wandb/
 videos/
+recordings/
 *.ckpt
 *.pt
 *.pth
 *.npy
 *.npz
+
+# Cluster jobs and profiling
+slurm-*.out
+*.log
+profile/
+core.*
+
+# Local environment overrides
+.env.*
+!.env.example
 
 # Editors and OS
 .idea/

@@ -1,0 +1,40 @@
+<mujoco model="two-object pick and place">
+  <include file="assets/mujoco_menagerie/franka_emika_panda/panda.xml"/>
+
+  <!-- MuJoCo uses SI units: meters, kilograms, seconds, and radians. -->
+  <compiler meshdir="assets/mujoco_menagerie/franka_emika_panda/assets"/>
+  <option timestep="0.002" integrator="implicitfast"/>
+
+  <visual>
+    <headlight diffuse="0.8 0.8 0.8" ambient="0.3 0.3 0.3"/>
+    <global azimuth="135" elevation="-25"/>
+  </visual>
+
+  <asset>
+    <material name="table" rgba="0.55 0.58 0.62 1"/>
+    <material name="red" rgba="0.85 0.12 0.12 1"/>
+    <material name="blue" rgba="0.10 0.30 0.85 1"/>
+    <material name="red_goal" rgba="0.85 0.12 0.12 0.25"/>
+    <material name="blue_goal" rgba="0.10 0.30 0.85 0.25"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 2" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.18 0.20 0.22 1"/>
+    <!-- Box size values are half-extents, so the table top is 0.36 m high. -->
+    <geom name="table" type="box" pos="0.55 0 0.18" size="0.42 0.42 0.18" material="table"/>
+
+    <body name="red_cube" pos="0.42 -0.13 0.385">
+      <freejoint/>
+      <!-- Half-extents of 0.025 m make a 5 cm cube with mass 0.08 kg. -->
+      <geom type="box" size="0.025 0.025 0.025" mass="0.08" material="red" friction="1.2 0.01 0.001"/>
+    </body>
+    <body name="blue_cube" pos="0.42 0.13 0.385">
+      <freejoint/>
+      <geom type="box" size="0.025 0.025 0.025" mass="0.08" material="blue" friction="1.2 0.01 0.001"/>
+    </body>
+
+    <site name="red_goal" type="box" pos="0.55 -0.13 0.366" size="0.065 0.065 0.006" material="red_goal"/>
+    <site name="blue_goal" type="box" pos="0.55 0.13 0.366" size="0.065 0.065 0.006" material="blue_goal"/>
+  </worldbody>
+</mujoco>
