@@ -8,7 +8,7 @@ order. It runs on CPU with native MuJoCo; MJLab is not required.
 Create the isolated Python 3.11 environment once:
 
 ```powershell
-C:\Users\Lenovo\miniconda3\envs\env2\python.exe -m venv .venv
+python.exe -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
