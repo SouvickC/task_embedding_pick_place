@@ -10,7 +10,7 @@ class PickPlaceEnv(gym.Env):
 
     metadata = {"render_modes": ["human"]}
 
-    def __init__(self, render_mode=None):
+    def __init__(self, render_mode=None, required_stages=2):
         self.model = mujoco.MjModel.from_xml_path(str(Path(__file__).with_name("scene.xml")))
         self.data = mujoco.MjData(self.model)
         self.render_mode = render_mode
@@ -20,6 +20,7 @@ class PickPlaceEnv(gym.Env):
         self.step_count = 0
         self.stage = 0
         self.order = np.array([0, 1])
+        self.required_stages = required_stages
 
         # Seven arm target changes and one gripper command.
         self.action_space = gym.spaces.Box(-1.0, 1.0, (8,), dtype=np.float32)
@@ -58,6 +59,10 @@ class PickPlaceEnv(gym.Env):
         stage = np.eye(2)[min(self.stage, 1)]
         return np.concatenate((self.data.qpos[:7], self.data.qvel[:7], cubes, goals, task, stage)).astype(np.float32)
 
+    def stage_complete(self, active, distance):
+        cube_height = self.data.xpos[self.cube_ids[active], 2]
+        return distance < 0.08 and cube_height < 0.43
+
     def step(self, action):
         action = np.asarray(action, dtype=float)
         # A full action changes each joint target by at most 0.04 radians.
@@ -74,11 +79,11 @@ class PickPlaceEnv(gym.Env):
         distance = np.linalg.norm(self.data.xpos[self.cube_ids[active]] - self.data.site_xpos[self.goal_ids[active]])
         reward = -distance
         # Success means within 8 cm of the goal and below 43 cm, near the table.
-        if self.stage < 2 and distance < 0.08 and self.data.xpos[self.cube_ids[active], 2] < 0.43:
+        if self.stage < 2 and self.stage_complete(active, distance):
             self.stage += 1
             reward += 5.0
 
-        terminated = self.stage >= 2
+        terminated = self.stage >= self.required_stages
         truncated = self.step_count >= 1000
         if self.viewer is not None:
             self.viewer.sync()

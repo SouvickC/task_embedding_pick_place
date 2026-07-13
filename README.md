@@ -22,18 +22,26 @@ the first placement before starting the second.
 Train the CPU PPO policy and then visualize it:
 
 ```powershell
-.\.venv\Scripts\python.exe ppo.py --steps 200000
+.\.venv\Scripts\python.exe ppo.py --steps 3000000
 .\.venv\Scripts\python.exe ppo.py --play
 ```
 
 Training saves every 25,000 steps. Continue from the final checkpoint with:
 
 ```powershell
-.\.venv\Scripts\python.exe ppo.py --steps 200000 --resume checkpoints/ppo_pick_place.zip
+.\.venv\Scripts\python.exe ppo.py --steps 200000 --resume checkpoints/ppo_pick_place_v5.zip
 ```
 
 `--steps` means additional steps when resuming. A periodic checkpoint such as
-`checkpoints/ppo_pick_place_100000_steps.zip` can be passed the same way.
+`checkpoints/ppo_pick_place_v5_100000_steps.zip` can be passed the same way.
+
+Fresh training uses a curriculum without changing the observation or action
+shape. It stays on one-box episodes until the rolling one-box placement rate is
+at least 70% across 100 episodes, after at least 100,000 timesteps. It then
+switches permanently to the complete two-box task. Configure these gates with
+`--curriculum-threshold`, `--curriculum-window`, and
+`--curriculum-min-steps`. The stable-grasp task uses `v5` checkpoints; do not
+resume older checkpoints trained with the previous grasp transition.
 
 On a Linux GPU cluster, use several CPU simulation workers and CUDA for PPO:
 
@@ -44,7 +52,7 @@ pip install -r requirements.txt
 python ppo.py --steps 2000000 --envs 16 --device cuda
 ```
 
-Download `checkpoints/ppo_pick_place.zip` and place it in the laptop's
+Download `checkpoints/ppo_pick_place_v5.zip` and place it in the laptop's
 `checkpoints` directory. `ppo.py --play` always loads it on CPU.
 
 View reward and optimization curves during training:
@@ -53,10 +61,16 @@ View reward and optimization curves during training:
 .\.venv\Scripts\python.exe -m tensorboard.main --logdir runs
 ```
 
+TensorBoard reports first-box grasp, lift, release, and placement rates, plus
+`rollout/full_task_success_rate` and `curriculum/required_stages`. Placement
+requires a grasped lift, release in the goal, table contact, and ten stable
+simulation steps.
+
 `rl_env.py` gives PPO four actions: hand movement in x/y/z and the gripper.
 Inverse kinematics converts hand movement into Panda joint targets. The policy
 therefore learns task behavior without also having to discover robot kinematics.
-Its observation adds the hand XYZ position to the original 32 environment values.
+Its observation adds the fingertip XYZ position and gripper opening to the
+original 32 environment values.
 
 ## Task embedding
 
