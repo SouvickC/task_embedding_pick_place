@@ -8,6 +8,8 @@ from pick_place import PickPlaceEnv
 class RLPickPlaceEnv(PickPlaceEnv):
     """PPO controls Cartesian hand motion while IK controls robot joints."""
 
+    TRAINING_PHASES = ("lift", "place_one", "place_two")
+
     def __init__(self, render_mode=None, required_stages=2):
         super().__init__(render_mode, required_stages=required_stages)
 
@@ -20,7 +22,7 @@ class RLPickPlaceEnv(PickPlaceEnv):
         self.observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
-            shape=(36,),
+            shape=(39,),
             dtype=np.float32,
         )
 
@@ -32,11 +34,24 @@ class RLPickPlaceEnv(PickPlaceEnv):
             self.model.body("left_finger").id,
             self.model.body("right_finger").id,
         }
+        # Only fingertip-pad box geoms count. Mesh contacts also happen when
+        # the hand is merely pushing down on a cube.
+        self.finger_pad_geoms = {
+            body_id: {
+                geom_id
+                for geom_id in range(self.model.ngeom)
+                if self.model.geom_bodyid[geom_id] == body_id
+                and self.model.geom_type[geom_id] == mujoco.mjtGeom.mjGEOM_BOX
+            }
+            for body_id in self.finger_ids
+        }
         self.table_geom_id = self.model.geom("table").id
         self.cube_qvel = [
             self.model.jnt_dofadr[self.model.body_jntadr[i]]
             for i in self.cube_ids
         ]
+        # Evaluation uses the full task. Training explicitly selects a phase.
+        self.training_phase = "place_two"
 
     def _gripper_opening(self):
         # Two 4 cm finger joints give an 8 cm maximum opening.
@@ -48,10 +63,20 @@ class RLPickPlaceEnv(PickPlaceEnv):
         return self.data.xpos[self.hand_id] + 0.105 * rotation[:, 2]
 
     def observation(self):
+        active = self.order[min(self.stage, len(self.order) - 1)]
+        milestones = np.array(
+            [
+                self.grasp_held[active],
+                self.has_lifted[active],
+                self.has_released[active],
+            ],
+            dtype=np.float32,
+        )
         return np.concatenate(
             (
                 self._grasp_point(),
                 [self._gripper_opening()],
+                milestones,
                 super().observation(),
             )
         ).astype(np.float32)
@@ -93,11 +118,30 @@ class RLPickPlaceEnv(PickPlaceEnv):
         for contact in self.data.contact:
             body1 = self.model.geom_bodyid[contact.geom1]
             body2 = self.model.geom_bodyid[contact.geom2]
-            if body1 == cube_id and body2 in self.finger_ids:
+            if (
+                body1 == cube_id
+                and body2 in self.finger_ids
+                and contact.geom2 in self.finger_pad_geoms[body2]
+            ):
                 touching_fingers.add(body2)
-            if body2 == cube_id and body1 in self.finger_ids:
+            if (
+                body2 == cube_id
+                and body1 in self.finger_ids
+                and contact.geom1 in self.finger_pad_geoms[body1]
+            ):
                 touching_fingers.add(body1)
-        return touching_fingers == self.finger_ids
+
+        if touching_fingers != self.finger_ids:
+            return False
+
+        # A centered grasp of the 5 cm cube leaves about 5 cm between the
+        # fingers. Near-zero opening means the fingers closed beside/above the
+        # cube and are pushing it, which caused the old false positives.
+        opening = self._gripper_opening()
+        grasp_distance = float(
+            np.linalg.norm(self._grasp_point() - self.data.xpos[cube_id])
+        )
+        return 0.035 < opening < 0.065 and grasp_distance < 0.025
 
     def _cube_touches_table(self, active):
         cube_id = self.cube_ids[active]
@@ -127,10 +171,11 @@ class RLPickPlaceEnv(PickPlaceEnv):
                 self._grasp_point() - self.data.xpos[self.cube_ids[active]]
             )
         )
+        opening = self._gripper_opening()
         briefly_missing_contact = (
             self.grasp_miss_steps[active] <= 3
-            and self._gripper_opening() < 0.05
-            and grasp_distance < 0.06
+            and 0.035 < opening < 0.065
+            and grasp_distance < 0.035
         )
         self.grasp_held[active] = bool(
             self.has_grasped[active]
@@ -174,6 +219,22 @@ class RLPickPlaceEnv(PickPlaceEnv):
         if required_stages not in (1, 2):
             raise ValueError("required_stages must be 1 or 2")
         self.required_stages = required_stages
+
+    def set_training_phase(self, phase):
+        if phase not in self.TRAINING_PHASES:
+            raise ValueError(
+                f"phase must be one of {self.TRAINING_PHASES}, got {phase!r}"
+            )
+        self.training_phase = phase
+        self.required_stages = 2 if phase == "place_two" else 1
+
+    @staticmethod
+    def _pre_lift_action_reward(action):
+        """Prefer upward motion and a close command after a secure grasp."""
+        return (
+            0.02 * float(action[2])
+            + 0.01 * max(float(-action[3]), 0.0)
+        )
 
     def _joint_action(self, hand_target, gripper):
         position_error = hand_target - self.data.xpos[self.hand_id]
@@ -262,8 +323,11 @@ class RLPickPlaceEnv(PickPlaceEnv):
             reward += 10.0 * reach_progress
 
         # Closing is useful only when the fingertips are aligned with the cube.
-        if near_cube and not grasp_held:
-            reward += 5.0 * closing_progress
+        if near_cube and not grasp_held and action[3] < 0.0:
+            # The actuator has noticeable lag. Credit closing progress only
+            # while the policy is commanding close, so an old close command
+            # cannot teach the policy to open at contact.
+            reward += 5.0 * max(closing_progress, 0.0)
         elif action[3] < 0.0 and not grasp_held:
             reward -= 0.01
 
@@ -272,7 +336,13 @@ class RLPickPlaceEnv(PickPlaceEnv):
 
         # Teach raising only until the lift milestone; lowering is needed later.
         if grasp_held and not lifted:
-            reward += 30.0 * lift_progress
+            # The complete 4.5 cm rise is now worth up to 5 reward instead of
+            # only 1.35, while preserving a dense progress signal.
+            reward += 5.0 * lift_progress / 0.045
+            # The milestone flags are observable, so PPO can learn a clear
+            # post-grasp mode: keep closing and move upward. This action shaping
+            # is deliberately weaker than the physical cube-height progress.
+            reward += self._pre_lift_action_reward(action)
 
         # Award this milestone only on the false -> true state transition.
         if newly_lifted:
@@ -285,10 +355,17 @@ class RLPickPlaceEnv(PickPlaceEnv):
             reward -= 0.02
 
         # Opening is useful only after lowering the carried cube into the goal.
-        if lifted and in_goal:
-            reward += 5.0 * opening_progress
-        elif action[3] > 0.0 and self.has_grasped[active] and not self.has_released[active]:
-            reward -= 0.01
+        if lifted and in_goal and action[3] > 0.0:
+            reward += 5.0 * max(opening_progress, 0.0)
+        elif action[3] > 0.0 and grasp_held and not self.has_released[active]:
+            reward -= 0.10
+
+        lift_task_success = bool(
+            self.training_phase == "lift" and newly_lifted
+        )
+        if lift_task_success:
+            reward += 20.0
+            terminated = True
 
         stage_completed = self.stage > previous_stage
         if stage_completed:
@@ -337,7 +414,23 @@ class RLPickPlaceEnv(PickPlaceEnv):
             first_box_released=bool(self.has_released[self.order[0]]),
             first_box_success=self.stage >= 1,
             full_task_success=task_success,
-            is_success=task_success,
+            training_success=(
+                lift_task_success
+                or (
+                    self.training_phase == "place_one"
+                    and self.stage >= 1
+                )
+                or task_success
+            ),
+            curriculum_phase=self.training_phase,
+            is_success=(
+                lift_task_success
+                or (
+                    self.training_phase == "place_one"
+                    and self.stage >= 1
+                )
+                or task_success
+            ),
         )
 
         self.previous_gripper_opening = gripper_opening

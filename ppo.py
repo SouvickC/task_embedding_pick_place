@@ -24,6 +24,7 @@ class SuccessRateCallback(BaseCallback):
         self.grasp_results = deque(maxlen=window_size)
         self.lift_results = deque(maxlen=window_size)
         self.release_results = deque(maxlen=window_size)
+        self.training_results = deque(maxlen=window_size)
 
     def _on_step(self):
         for done, info in zip(self.locals["dones"], self.locals["infos"]):
@@ -33,6 +34,7 @@ class SuccessRateCallback(BaseCallback):
                 self.release_results.append(float(info["first_box_released"]))
                 self.first_box_results.append(float(info["first_box_success"]))
                 self.full_task_results.append(float(info["full_task_success"]))
+                self.training_results.append(float(info["training_success"]))
 
         if self.first_box_results:
             self.logger.record("rollout/first_box_grasp_rate", np.mean(self.grasp_results))
@@ -46,11 +48,15 @@ class SuccessRateCallback(BaseCallback):
                 "rollout/full_task_success_rate",
                 np.mean(self.full_task_results),
             )
+            self.logger.record(
+                "rollout/training_success_rate",
+                np.mean(self.training_results),
+            )
         return True
 
 
 class CurriculumCallback(BaseCallback):
-    """Switch to two boxes only after sustained one-box placement success."""
+    """Progress from lifting to one placement and then the two-box task."""
 
     def __init__(self, threshold=0.7, window_size=100, min_timesteps=100_000):
         super().__init__()
@@ -58,33 +64,48 @@ class CurriculumCallback(BaseCallback):
         self.window_size = window_size
         self.min_timesteps = min_timesteps
         self.successes = deque(maxlen=window_size)
-        self.current_stages = 1
+        self.phases = ("lift", "place_one", "place_two")
+        self.current_phase_index = 0
+        self.phase_start_step = 0
 
-    def _set_stages(self, stages):
-        if stages != self.current_stages or self.n_calls == 0:
-            self.training_env.env_method("set_required_stages", stages)
-            self.current_stages = stages
+    @property
+    def current_phase(self):
+        return self.phases[self.current_phase_index]
+
+    def _set_phase(self, phase_index):
+        if phase_index != self.current_phase_index or self.n_calls == 0:
+            self.current_phase_index = phase_index
+            self.training_env.env_method(
+                "set_training_phase",
+                self.current_phase,
+            )
+            self.successes.clear()
+            self.phase_start_step = self.num_timesteps
 
     def _on_training_start(self):
-        self._set_stages(1)
+        self._set_phase(0)
 
     def _on_step(self):
-        if self.current_stages == 1:
+        if self.current_phase_index < len(self.phases) - 1:
             for done, info in zip(self.locals["dones"], self.locals["infos"]):
                 if done:
-                    self.successes.append(float(info["first_box_success"]))
+                    self.successes.append(float(info["training_success"]))
 
             ready = (
-                self.num_timesteps >= self.min_timesteps
+                self.num_timesteps - self.phase_start_step >= self.min_timesteps
                 and len(self.successes) == self.window_size
                 and np.mean(self.successes) >= self.threshold
             )
             if ready:
-                self._set_stages(2)
+                self._set_phase(self.current_phase_index + 1)
 
         success_rate = np.mean(self.successes) if self.successes else 0.0
-        self.logger.record("curriculum/required_stages", self.current_stages)
-        self.logger.record("curriculum/one_box_success_rate", success_rate)
+        self.logger.record("curriculum/phase", self.current_phase_index)
+        self.logger.record(
+            "curriculum/required_stages",
+            2 if self.current_phase == "place_two" else 1,
+        )
+        self.logger.record("curriculum/phase_success_rate", success_rate)
         self.logger.record("curriculum/target_success_rate", self.threshold)
         return True
 
@@ -124,7 +145,7 @@ def train(
     checkpoint = CheckpointCallback(
         save_freq=max(25_000 // env_count, 1),
         save_path="checkpoints/",
-        name_prefix="ppo_pick_place_v5",
+        name_prefix="ppo_pick_place_v7",
     )
     callbacks = CallbackList([
         checkpoint,
@@ -136,7 +157,7 @@ def train(
         ),
     ])
     model.learn(total_timesteps=steps, callback=callbacks, reset_num_timesteps=not resume)
-    model.save("checkpoints/ppo_pick_place_v5")
+    model.save("checkpoints/ppo_pick_place_v7")
     env.close()
 
 
@@ -205,7 +226,7 @@ if __name__ == "__main__":
     parser.add_argument("--curriculum-window", type=int, default=100)
     parser.add_argument("--curriculum-min-steps", type=int, default=100_000)
     parser.add_argument("--evaluate", type=int, metavar="EPISODES")
-    parser.add_argument("--checkpoint", default="checkpoints/ppo_pick_place_v5.zip")
+    parser.add_argument("--checkpoint", default="checkpoints/ppo_pick_place_v7.zip")
     args = parser.parse_args()
     if args.play:
         play(args.checkpoint)

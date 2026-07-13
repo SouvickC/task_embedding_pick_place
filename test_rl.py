@@ -33,7 +33,8 @@ class RLEnvironmentTest(unittest.TestCase):
         self.assertEqual(observation[-6:].tolist(), [0, 1, 1, 0, 1, 0])
 
         next_observation, reward, terminated, truncated, info = env.step(np.zeros(4))
-        self.assertEqual(next_observation.shape, (36,))
+        self.assertEqual(next_observation.shape, (39,))
+        self.assertEqual(next_observation[4:7].tolist(), [0, 0, 0])
         self.assertTrue(np.isfinite(reward))
         self.assertFalse(terminated)
         self.assertFalse(truncated)
@@ -47,8 +48,31 @@ class RLEnvironmentTest(unittest.TestCase):
         self.assertFalse(info["first_box_success"])
         self.assertFalse(info["full_task_success"])
         self.assertEqual(env.action_space.shape, (4,))
-        self.assertEqual(next_observation.shape, (36,))
+        self.assertEqual(next_observation.shape, (39,))
         env.close()
+
+    def test_milestone_flags_are_observable(self):
+        env = RLPickPlaceEnv()
+        env.reset(seed=3)
+        active = env.order[0]
+        env.grasp_held[active] = True
+        env.has_lifted[active] = True
+        env.has_released[active] = False
+
+        observation = env.observation()
+
+        self.assertEqual(observation.shape, (39,))
+        self.assertEqual(observation[4:7].tolist(), [1, 1, 0])
+        env.close()
+
+    def test_pre_lift_action_reward_prefers_closed_and_upward(self):
+        upward_closed = np.array([0.0, 0.0, 1.0, -1.0])
+        downward_open = np.array([0.0, 0.0, -1.0, 1.0])
+
+        self.assertGreater(
+            RLPickPlaceEnv._pre_lift_action_reward(upward_closed),
+            RLPickPlaceEnv._pre_lift_action_reward(downward_open),
+        )
 
     def test_cube_cannot_be_lifted_without_a_grasp(self):
         env = RLPickPlaceEnv()
@@ -72,6 +96,45 @@ class RLEnvironmentTest(unittest.TestCase):
         self.assertEqual(env.required_stages, 2)
         with self.assertRaises(ValueError):
             env.set_required_stages(3)
+        env.set_training_phase("lift")
+        self.assertEqual(env.training_phase, "lift")
+        self.assertEqual(env.required_stages, 1)
+        env.set_training_phase("place_two")
+        self.assertEqual(env.required_stages, 2)
+        with self.assertRaises(ValueError):
+            env.set_training_phase("grasp")
+        env.close()
+
+    def test_closed_fingers_pushing_cube_do_not_count_as_grasp(self):
+        env = RLPickPlaceEnv()
+        env.reset(seed=3)
+        active = env.order[0]
+
+        with (
+            patch.object(env, "_gripper_opening", return_value=0.005),
+            patch.object(
+                env,
+                "_grasp_point",
+                return_value=env.data.xpos[env.cube_ids[active]].copy(),
+            ),
+        ):
+            self.assertFalse(env._cube_grasped(active))
+        env.close()
+
+    def test_grasp_requires_centered_fingertip_contact(self):
+        env = RLPickPlaceEnv()
+        env.reset(seed=3)
+        active = env.order[0]
+        off_center = (
+            env.data.xpos[env.cube_ids[active]].copy()
+            + np.array([0.04, 0.0, 0.0])
+        )
+
+        with (
+            patch.object(env, "_gripper_opening", return_value=0.05),
+            patch.object(env, "_grasp_point", return_value=off_center),
+        ):
+            self.assertFalse(env._cube_grasped(active))
         env.close()
 
     def test_grasp_requires_stable_contact_and_tolerates_brief_flicker(self):
@@ -127,6 +190,38 @@ class RLEnvironmentTest(unittest.TestCase):
         self.assertTrue(completion["released"])
         self.assertTrue(completion["settled"])
         self.assertGreaterEqual(completion["settle_steps"], 10)
+        env.close()
+
+    def test_lift_curriculum_terminates_on_secure_lift(self):
+        env = RLPickPlaceEnv()
+        env.reset(seed=3)
+        env.set_training_phase("lift")
+        active = env.order[0]
+        cube = env.data.xpos[env.cube_ids[active]].copy()
+
+        self._move_hand(env, cube + [0, 0, 0.18], True)
+        self._move_hand(env, cube + [0, 0, 0.105], True)
+        self._move_hand(env, cube + [0, 0, 0.105], False, 0.8)
+
+        terminated = False
+        info = None
+        target = cube + [0, 0, 0.25]
+        for _ in range(100):
+            action = np.zeros(4, dtype=np.float32)
+            action[:3] = np.clip(
+                (target - env.data.xpos[env.hand_id]) / 0.02,
+                -1.0,
+                1.0,
+            )
+            action[3] = -1.0
+            _, _, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                break
+
+        self.assertTrue(terminated)
+        self.assertTrue(info["first_box_lifted"])
+        self.assertTrue(info["training_success"])
+        self.assertFalse(info["full_task_success"])
         env.close()
 
 
