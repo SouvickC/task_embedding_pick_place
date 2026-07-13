@@ -1,6 +1,7 @@
 import argparse
 import time
 from collections import deque
+from pathlib import Path
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -161,7 +162,60 @@ def train(
     env.close()
 
 
-def play(checkpoint):
+def configure_camera(camera):
+    camera.lookat[:] = (0.50, 0.0, 0.35)
+    camera.distance = 1.45
+    camera.azimuth = 135
+    camera.elevation = -25
+
+
+def record_playback(checkpoint, output_path):
+    import imageio.v2 as imageio
+    import mujoco
+
+    env = RLPickPlaceEnv()
+    model = PPO.load(checkpoint, device="cpu")
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    renderer = mujoco.Renderer(env.model, height=1080, width=1920)
+    camera = mujoco.MjvCamera()
+    configure_camera(camera)
+    writer = imageio.get_writer(
+        output,
+        fps=50,
+        codec="libx264",
+        pixelformat="yuv420p",
+        ffmpeg_params=["-crf", "18", "-preset", "slow"],
+    )
+
+    try:
+        observation, info = env.reset()
+        print("checkpoint:", checkpoint)
+        print("Task order:", info["order"])
+
+        while True:
+            renderer.update_scene(env.data, camera=camera)
+            writer.append_data(renderer.render())
+            action, _ = model.predict(observation, deterministic=True)
+            observation, _, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                renderer.update_scene(env.data, camera=camera)
+                writer.append_data(renderer.render())
+                print("Success:", info["is_success"])
+                break
+    finally:
+        writer.close()
+        renderer.close()
+        env.close()
+
+    print("Recording saved to:", output.resolve())
+
+
+def play(checkpoint, record_path=None):
+    if record_path:
+        record_playback(checkpoint, record_path)
+        return
+
     env = RLPickPlaceEnv(render_mode="human")
     model = PPO.load(checkpoint, device="cpu")
     print("checkpoint:", checkpoint)
@@ -213,6 +267,13 @@ def evaluate(checkpoint, episodes):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--play", action="store_true")
+    parser.add_argument(
+        "--record",
+        nargs="?",
+        const="recordings/ppo_pick_place.mp4",
+        metavar="PATH",
+        help="With --play, record one 1080p 50 FPS episode to MP4",
+    )
     parser.add_argument("--steps", type=int, default=200_000)
     parser.add_argument("--resume", help="Checkpoint path to continue training from")
     parser.add_argument("--device", default="auto", help="auto, cpu, or cuda")
@@ -229,7 +290,7 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint", default="checkpoints/ppo_pick_place_v7.zip")
     args = parser.parse_args()
     if args.play:
-        play(args.checkpoint)
+        play(args.checkpoint, args.record)
     elif args.evaluate:
         evaluate(args.checkpoint, args.evaluate)
     else:

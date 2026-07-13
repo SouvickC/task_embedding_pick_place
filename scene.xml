@@ -7,7 +7,7 @@
 
   <visual>
     <headlight diffuse="0.8 0.8 0.8" ambient="0.3 0.3 0.3"/>
-    <global azimuth="135" elevation="-25"/>
+    <global azimuth="135" elevation="-25" offwidth="1920" offheight="1080"/>
   </visual>
 
   <asset>

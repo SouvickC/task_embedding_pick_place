@@ -24,6 +24,12 @@ Train or play the PPO policy:
 .\.venv\Scripts\python.exe ppo.py --play
 ```
 
+Record one high-quality 1080p, 50 FPS episode:
+
+```powershell
+.\.venv\Scripts\python.exe ppo.py --play --record recordings/simulation.mp4
+```
+
 Resume training:
 
 ```powershell
