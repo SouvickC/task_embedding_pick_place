@@ -3,8 +3,7 @@
 This project tests whether a PPO policy can use a task embedding to place two cubes in the requested order.
 
 ## Simulation
-
-> GIF coming soon.
+![alt text](assets/gif.gif)
 
 ## Setup
 
